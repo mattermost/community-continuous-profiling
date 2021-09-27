@@ -79,13 +79,12 @@ func main() {
 		}
 
 		log.Infof("Running profiling for %s", deployment)
-		err = profiling(envVars.ProfilingTime, pods)
-		if err != nil {
+		if err = profiling(envVars.ProfilingTime, pods); err != nil {
 			log.WithError(err).Error("Failed to run profiling")
 			return
 		}
-		err = uploadPostFiles(pods, *envVars, deployment)
-		if err != nil {
+
+		if err = uploadPostFiles(pods, *envVars, deployment); err != nil {
 			log.WithError(err).Error("Failed to upload and post files")
 			return
 		}
@@ -105,7 +104,7 @@ func uploadPostFiles(pods []Pod, envVars environmentVariables, deployment string
 		log.Infof("Uploading file %s", memFile)
 		memResponse, err := uploadFile(envVars.UploadAPIURL, envVars.Token, memValues)
 		if err != nil {
-			return errors.Errorf("Failed to upload file %s", memFile)
+			return errors.Wrapf(err, "Failed to upload file %s", memFile)
 		}
 		uploads = append(uploads, memResponse.FileInfos[0].ID)
 
@@ -118,15 +117,15 @@ func uploadPostFiles(pods []Pod, envVars environmentVariables, deployment string
 		log.Infof("Uploading file %s", cpuFile)
 		cpuResponse, err := uploadFile(envVars.UploadAPIURL, envVars.Token, cpuValues)
 		if err != nil {
-			return errors.Errorf("Failed to upload file %s", cpuFile)
+			return errors.Wrapf(err, "Failed to upload file %s", cpuFile)
 		}
 		uploads = append(uploads, cpuResponse.FileInfos[0].ID)
 	}
 	log.Info("Posting files")
-	err := postFile(envVars.PostAPIURL, envVars.ChannelID, envVars.Token, deployment, uploads)
-	if err != nil {
-		return errors.Errorf("Failed to post files")
+	if err := postFile(envVars.PostAPIURL, envVars.ChannelID, envVars.Token, deployment, uploads); err != nil {
+		return errors.Wrap(err, "Failed to post files")
 	}
+
 	return nil
 }
 
@@ -206,15 +205,14 @@ func profiling(seconds string, pods []Pod) (err error) {
 		memoryFileCMD := exec.Command("touch", fmt.Sprintf("%s_mem.prof", pod.PodName))
 		memoryFileCMD.Stdout = os.Stdout
 		memoryFileCMD.Stderr = os.Stderr
-		err = memoryFileCMD.Run()
-		if err != nil {
+		if err = memoryFileCMD.Run(); err != nil {
 			return err
 		}
+
 		memCMD := exec.Command("curl", fmt.Sprintf("http://%s:8067/debug/pprof/heap", pod.PodIP), "-o", fmt.Sprintf("%s_mem.prof", pod.PodName))
 		memCMD.Stdout = os.Stdout
 		memCMD.Stderr = os.Stderr
-		err = memCMD.Run()
-		if err != nil {
+		if err = memCMD.Run(); err != nil {
 			return err
 		}
 
@@ -222,15 +220,14 @@ func profiling(seconds string, pods []Pod) (err error) {
 		cpuFileCMD := exec.Command("touch", fmt.Sprintf("%s_cpu.prof", pod.PodName))
 		cpuFileCMD.Stdout = os.Stdout
 		cpuFileCMD.Stderr = os.Stderr
-		err = cpuFileCMD.Run()
-		if err != nil {
+		if err = cpuFileCMD.Run(); err != nil {
 			return err
 		}
+
 		cpuCmd := exec.Command("curl", fmt.Sprintf("http://%s:8067/debug/pprof/profile?seconds=%s", pod.PodIP, seconds), "-o", fmt.Sprintf("%s_cpu.prof", pod.PodName))
 		cpuCmd.Stdout = os.Stdout
 		cpuCmd.Stderr = os.Stderr
-		err = cpuCmd.Run()
-		if err != nil {
+		if err = cpuCmd.Run(); err != nil {
 			return err
 		}
 	}
