@@ -13,8 +13,11 @@ This is the API url that should be used for the profiling attachment uploads. Fo
 - POST_API_URL:
 This is the API url that should be used for the profiling attachment posts. For example `http://community:8065/api/v4/posts`. More information on Mattermost posts API call can be found [here](https://api.mattermost.com/#tag/posts).
 
-- MATTERMOST_PROFILE_TARGETS:
-The k8s service name of the target that the profile will run against to. For example `community`
+- MATTERMOST_DEPLOYMENTS:
+The k8s deployments that profiling will be run against their pods.. For example `community, community-release`
+
+- MATTERMOST_NAMESPACE:
+The namespace of the Mattermost deployments. Each profiling job can run against one namespace only.
 
 - PROFILING_TIME:
 How long the CPU profiling should run for. For example `30` for 30 seconds.
@@ -24,3 +27,6 @@ The ID of the channel that the microservice should post the profiles. It is best
 
 - TOKEN:
 The Token for the Mattermost Bot that will authenticate and upload/post the profile attachments. It is best to keep this in a k8s secret. More information on Mattermost bots can be found [here](https://docs.mattermost.com/developer/bot-accounts.html).
+
+- DEVELOPER_MODE(Optional):
+When set to true local k8s config is used for developing purposes

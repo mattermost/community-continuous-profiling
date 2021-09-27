@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,12 +11,26 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
+
+// Pod is used to store each deployments pod information
+type Pod struct {
+	PodName string `json:"podName"`
+	PodIP   string `json:"podIP"`
+}
 
 type uploadResponse struct {
 	FileInfos []struct {
@@ -26,30 +41,62 @@ type uploadResponse struct {
 }
 
 type environmentVariables struct {
-	UploadAPIURL             string
-	PostAPIURL               string
-	MattermostProfileTargets []string
-	ProfilingTime            string
-	ChannelID                string
-	Token                    string
+	UploadAPIURL          string
+	PostAPIURL            string
+	MattermostDeployments []string
+	MattermostNamespace   string
+	ProfilingTime         string
+	ChannelID             string
+	Token                 string
+	DevMode               string
 }
 
 func main() {
 	envVars, err := validateAndGetEnvVars()
 	if err != nil {
 		log.WithError(err).Error("Environment variable validation failed")
+		return
 	}
 
-	uploads := []string{}
-	log.Infof("Running profiling for %s", strings.Join(envVars.MattermostProfileTargets, ", "))
-	err = profiling(envVars.ProfilingTime, envVars.MattermostProfileTargets)
+	clientset, err := getClientSet(envVars)
 	if err != nil {
-		log.WithError(err).Error("Failed to run profiling")
+		log.WithError(err).Error("Unable to create k8s clientset")
+		return
 	}
 
+	for _, deployment := range envVars.MattermostDeployments {
+		pods := []Pod{}
+		deploymentPods, err := getPodsFromDeployment(envVars.MattermostNamespace, deployment, clientset)
+		if err != nil {
+			log.WithError(err).Error("Unable to get pods from deployment")
+			return
+		}
+		for _, deploymentPod := range deploymentPods.Items {
+			var pod Pod
+			pod.PodName = deploymentPod.GetName()
+			pod.PodIP = deploymentPod.Status.PodIP
+			pods = append(pods, pod)
+		}
+
+		log.Infof("Running profiling for %s", deployment)
+		err = profiling(envVars.ProfilingTime, pods)
+		if err != nil {
+			log.WithError(err).Error("Failed to run profiling")
+			return
+		}
+		err = uploadPostFiles(pods, *envVars, deployment)
+		if err != nil {
+			log.WithError(err).Error("Failed to upload and post files")
+			return
+		}
+	}
+}
+
+func uploadPostFiles(pods []Pod, envVars environmentVariables, deployment string) error {
 	log.Infof("Uploading files in channel - %s", envVars.ChannelID)
-	for _, target := range envVars.MattermostProfileTargets {
-		memFile := fmt.Sprintf("%s_mem.prof", target)
+	uploads := []string{}
+	for _, pod := range pods {
+		memFile := fmt.Sprintf("%s_mem.prof", pod.PodName)
 
 		memValues := map[string]io.Reader{
 			"files":      openFile(memFile),
@@ -58,11 +105,11 @@ func main() {
 		log.Infof("Uploading file %s", memFile)
 		memResponse, err := uploadFile(envVars.UploadAPIURL, envVars.Token, memValues)
 		if err != nil {
-			log.WithError(err).Errorf("Failed to upload file %s", memFile)
+			return errors.Errorf("Failed to upload file %s", memFile)
 		}
 		uploads = append(uploads, memResponse.FileInfos[0].ID)
 
-		cpuFile := fmt.Sprintf("%s_cpu.prof", target)
+		cpuFile := fmt.Sprintf("%s_cpu.prof", pod.PodName)
 
 		cpuValues := map[string]io.Reader{
 			"files":      openFile(cpuFile),
@@ -71,17 +118,30 @@ func main() {
 		log.Infof("Uploading file %s", cpuFile)
 		cpuResponse, err := uploadFile(envVars.UploadAPIURL, envVars.Token, cpuValues)
 		if err != nil {
-			log.WithError(err).Errorf("Failed to upload file %s", cpuFile)
+			return errors.Errorf("Failed to upload file %s", cpuFile)
 		}
 		uploads = append(uploads, cpuResponse.FileInfos[0].ID)
 	}
-
 	log.Info("Posting files")
-	err = postFile(envVars.PostAPIURL, envVars.ChannelID, envVars.Token, uploads, envVars.MattermostProfileTargets)
+	err := postFile(envVars.PostAPIURL, envVars.ChannelID, envVars.Token, deployment, uploads)
 	if err != nil {
-		log.WithError(err).Error("Failed to post files")
+		return errors.Errorf("Failed to post files")
+	}
+	return nil
+}
+
+// GetPodsFromDeployment gets the pods that belong to a given deployment.
+func getPodsFromDeployment(namespace, deploymentName string, clientset *kubernetes.Clientset) (*corev1.PodList, error) {
+	ctx := context.TODO()
+	deployment, err := clientset.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
 	}
 
+	set := labels.Set(deployment.GetLabels())
+	listOptions := metav1.ListOptions{LabelSelector: set.AsSelector().String()}
+
+	return clientset.CoreV1().Pods(namespace).List(ctx, listOptions)
 }
 
 // validateEnvironmentVariables is used to validate the environment variables needed by community continuous profiling.
@@ -99,12 +159,18 @@ func validateAndGetEnvVars() (*environmentVariables, error) {
 	}
 	envVars.PostAPIURL = postAPIURL
 
-	mattermostProfileTargets := os.Getenv("MATTERMOST_PROFILE_TARGETS")
-	if len(mattermostProfileTargets) == 0 {
-		envVars.MattermostProfileTargets = []string{}
+	mattermostDeployments := os.Getenv("MATTERMOST_DEPLOYMENTS")
+	if len(mattermostDeployments) == 0 {
+		envVars.MattermostDeployments = []string{}
 	} else {
-		envVars.MattermostProfileTargets = strings.Split(mattermostProfileTargets, ",")
+		envVars.MattermostDeployments = strings.Split(mattermostDeployments, ",")
 	}
+
+	mattermostNamespace := os.Getenv("MATTERMOST_NAMESPACE")
+	if len(mattermostNamespace) == 0 {
+		return nil, errors.Errorf("CHANNEL_ID environment variable is not set.")
+	}
+	envVars.MattermostNamespace = mattermostNamespace
 
 	profilingTime := os.Getenv("PROFILING_TIME")
 	if len(profilingTime) == 0 {
@@ -124,13 +190,27 @@ func validateAndGetEnvVars() (*environmentVariables, error) {
 	}
 	envVars.Token = token
 
+	developerMode := os.Getenv("DEVELOPER_MODE")
+	if len(developerMode) == 0 {
+		envVars.DevMode = "false"
+	} else {
+		envVars.DevMode = developerMode
+	}
+
 	return envVars, nil
 }
 
-func profiling(seconds string, targets []string) (err error) {
-	for _, target := range targets {
-		log.Infof("Running memory profiling for %s", target)
-		memCMD := exec.Command("curl", fmt.Sprintf("http://%s:8067/debug/pprof/heap", target), "-o", fmt.Sprintf("%s_mem.prof", target))
+func profiling(seconds string, pods []Pod) (err error) {
+	for _, pod := range pods {
+		log.Infof("Running memory profiling for %s", pod.PodName)
+		memoryFileCMD := exec.Command("touch", fmt.Sprintf("%s_mem.prof", pod.PodName))
+		memoryFileCMD.Stdout = os.Stdout
+		memoryFileCMD.Stderr = os.Stderr
+		err = memoryFileCMD.Run()
+		if err != nil {
+			return err
+		}
+		memCMD := exec.Command("curl", fmt.Sprintf("http://%s:8067/debug/pprof/heap", pod.PodIP), "-o", fmt.Sprintf("%s_mem.prof", pod.PodName))
 		memCMD.Stdout = os.Stdout
 		memCMD.Stderr = os.Stderr
 		err = memCMD.Run()
@@ -138,8 +218,15 @@ func profiling(seconds string, targets []string) (err error) {
 			return err
 		}
 
-		log.Infof("Running cpu profiling for %s", target)
-		cpuCmd := exec.Command("curl", fmt.Sprintf("http://%s:8067/debug/pprof/profile?seconds=%s", target, seconds), "-o", fmt.Sprintf("%s_cpu.prof", target))
+		log.Infof("Running cpu profiling for %s", pod.PodName)
+		cpuFileCMD := exec.Command("touch", fmt.Sprintf("%s_cpu.prof", pod.PodName))
+		cpuFileCMD.Stdout = os.Stdout
+		cpuFileCMD.Stderr = os.Stderr
+		err = cpuFileCMD.Run()
+		if err != nil {
+			return err
+		}
+		cpuCmd := exec.Command("curl", fmt.Sprintf("http://%s:8067/debug/pprof/profile?seconds=%s", pod.PodIP, seconds), "-o", fmt.Sprintf("%s_cpu.prof", pod.PodName))
 		cpuCmd.Stdout = os.Stdout
 		cpuCmd.Stderr = os.Stderr
 		err = cpuCmd.Run()
@@ -151,11 +238,11 @@ func profiling(seconds string, targets []string) (err error) {
 	return nil
 }
 
-func postFile(url, channelID, token string, files, targets []string) (err error) {
+func postFile(url, channelID, token, deployment string, files []string) (err error) {
 	currentTime := time.Now()
 	requestBody, err := json.Marshal(map[string]interface{}{
 		"channel_id": channelID,
-		"message":    fmt.Sprintf("### CPU and Memory profiles for %s (%s UTC)", strings.Join(targets, ", "), currentTime.Format("2006-01-02 15:04:05")),
+		"message":    fmt.Sprintf("### CPU and Memory profiles for %s (%s UTC)", deployment, currentTime.Format("2006-01-02 15:04:05")),
 		"file_ids":   files,
 	},
 	)
@@ -234,4 +321,33 @@ func openFile(f string) *os.File {
 		panic(err)
 	}
 	return r
+}
+
+func getClientSet(envVars *environmentVariables) (*kubernetes.Clientset, error) {
+	if envVars.DevMode == "true" {
+
+		kubeconfig := filepath.Join(
+			os.Getenv("HOME"), ".kube", "config",
+		)
+
+		config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+		if err != nil {
+			return nil, err
+		}
+		clientset, err := kubernetes.NewForConfig(config)
+		if err != nil {
+			return nil, err
+		}
+		return clientset, nil
+	}
+
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	return clientset, nil
 }
