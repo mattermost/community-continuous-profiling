@@ -14,7 +14,7 @@ This is the API url that should be used for the profiling attachment uploads. Fo
 This is the API url that should be used for the profiling attachment posts. For example `http://community:8065/api/v4/posts`. More information on Mattermost posts API call can be found [here](https://api.mattermost.com/#tag/posts).
 
 - MATTERMOST_DEPLOYMENTS:
-The k8s deployments that profiling will be run against their pods.. For example `community, community-release`
+The k8s deployments that profiling will be run against their pods. For example `community, community-release`
 
 - MATTERMOST_NAMESPACE:
 The namespace of the Mattermost deployments. Each profiling job can run against one namespace only.
