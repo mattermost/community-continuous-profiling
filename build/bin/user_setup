@@ -6,8 +6,8 @@ mkdir -p ${HOME}
 chown ${USER_UID}:0 ${HOME}
 chmod ug+rwx ${HOME}
 
-chown -R ${USER_UID}:0 /community-continuous-profiling/*
-chmod -R ug+rwx /community-continuous-profiling/*
+chown ${USER_UID}:0 /community-continuous-profiling
+chmod ug+rwx /community-continuous-profiling
 
 # runtime user will need to be able to self-insert in /etc/passwd
 chmod g+rw /etc/passwd
